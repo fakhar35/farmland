@@ -1,0 +1,256 @@
+// Dairy Farm Management — V1 schema
+// Conventions:
+//  - UUID primary keys everywhere (sync-friendly for the V4 offline work)
+//  - Money stored as integer cents (Int), never floats
+//  - Production records carry a `scope` (HERD | GROUP | ANIMAL) — the
+//    service layer enforces that exactly one reference matches the scope
+//  - Soft business deletion is handled by status fields, not row deletes
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- enums ----------
+
+enum FarmMode {
+  HERD
+  INDIVIDUAL
+  HYBRID
+}
+
+enum Role {
+  OWNER
+  MANAGER
+  ACCOUNTANT
+  WORKER
+  VET
+}
+
+enum GroupType {
+  MILKING
+  DRY
+  HEIFER
+  CALF
+  SICK
+  OTHER
+}
+
+enum AnimalStatus {
+  CALF
+  HEIFER
+  MILKING
+  DRY
+  SOLD
+  CULLED
+  DEAD
+}
+
+enum Sex {
+  FEMALE
+  MALE
+}
+
+enum RecordScope {
+  HERD
+  GROUP
+  ANIMAL
+}
+
+enum MilkSession {
+  MORNING
+  EVENING
+}
+
+// ---------- identity ----------
+
+model User {
+  id           String       @id @default(uuid()) @db.Uuid
+  email        String       @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime     @default(now())
+  memberships  FarmMember[]
+  auditLogs    AuditLog[]
+}
+
+model Farm {
+  id             String       @id @default(uuid()) @db.Uuid
+  name           String
+  mode           FarmMode     @default(HYBRID)
+  currencySymbol String       @default("$")
+  currencyCode   String       @default("USD")
+  // default milk price used to prefill sale forms, in cents per liter
+  milkPriceCents Int          @default(0)
+  timezone       String       @default("UTC")
+  createdAt      DateTime     @default(now())
+
+  members    FarmMember[]
+  groups     HerdGroup[]
+  animals    Animal[]
+  milk       MilkRecord[]
+  feed       FeedRecord[]
+  expenses   Expense[]
+  sales      Sale[]
+  auditLogs  AuditLog[]
+}
+
+model FarmMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  farmId    String   @db.Uuid
+  userId    String   @db.Uuid
+  role      Role
+  createdAt DateTime @default(now())
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([farmId, userId])
+  @@index([userId])
+}
+
+// ---------- herd structure ----------
+
+model HerdGroup {
+  id     String    @id @default(uuid()) @db.Uuid
+  farmId String    @db.Uuid
+  name   String
+  type   GroupType @default(OTHER)
+  // Headcount for herd-mode farms that don't register individual animals.
+  // When individual animals are assigned, reporting prefers the real count.
+  headcount Int    @default(0)
+  createdAt DateTime @default(now())
+
+  farm    Farm         @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  animals Animal[]
+  milk    MilkRecord[]
+  feed    FeedRecord[]
+
+  @@unique([farmId, name])
+  @@index([farmId])
+}
+
+model Animal {
+  id        String       @id @default(uuid()) @db.Uuid
+  farmId    String       @db.Uuid
+  tag       String
+  name      String?
+  breed     String?
+  sex       Sex          @default(FEMALE)
+  status    AnimalStatus @default(MILKING)
+  dob       DateTime?    @db.Date
+  groupId   String?      @db.Uuid
+  motherId  String?      @db.Uuid
+  fatherId  String?      @db.Uuid
+  notes     String?
+  createdAt DateTime     @default(now())
+
+  farm   Farm       @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  group  HerdGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  mother Animal?    @relation("Lineage", fields: [motherId], references: [id], onDelete: SetNull)
+  children Animal[] @relation("Lineage")
+
+  milk MilkRecord[]
+  feed FeedRecord[]
+
+  @@unique([farmId, tag])
+  @@index([farmId, status])
+}
+
+// ---------- production records ----------
+
+model MilkRecord {
+  id       String      @id @default(uuid()) @db.Uuid
+  farmId   String      @db.Uuid
+  date     DateTime    @db.Date
+  session  MilkSession
+  scope    RecordScope
+  groupId  String?     @db.Uuid
+  animalId String?     @db.Uuid
+  // liters * 10 stored as int? No — Decimal keeps entry precision honest.
+  liters   Decimal     @db.Decimal(8, 2)
+  createdById String?  @db.Uuid
+  createdAt DateTime   @default(now())
+
+  farm   Farm       @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  group  HerdGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  animal Animal?    @relation(fields: [animalId], references: [id], onDelete: SetNull)
+
+  @@index([farmId, date])
+}
+
+model FeedRecord {
+  id         String      @id @default(uuid()) @db.Uuid
+  farmId     String      @db.Uuid
+  date       DateTime    @db.Date
+  scope      RecordScope
+  groupId    String?     @db.Uuid
+  animalId   String?     @db.Uuid
+  feedType   String
+  quantityKg Decimal     @db.Decimal(10, 2)
+  costCents  Int         @default(0)
+  createdById String?    @db.Uuid
+  createdAt  DateTime    @default(now())
+
+  farm   Farm       @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  group  HerdGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  animal Animal?    @relation(fields: [animalId], references: [id], onDelete: SetNull)
+
+  @@index([farmId, date])
+}
+
+// ---------- finance ----------
+
+model Expense {
+  id          String   @id @default(uuid()) @db.Uuid
+  farmId      String   @db.Uuid
+  date        DateTime @db.Date
+  category    String
+  amountCents Int
+  note        String?
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@index([farmId, date])
+}
+
+model Sale {
+  id                String   @id @default(uuid()) @db.Uuid
+  farmId            String   @db.Uuid
+  date              DateTime @db.Date
+  liters            Decimal  @db.Decimal(10, 2)
+  priceCentsPerLiter Int
+  customerName      String?
+  paid              Boolean  @default(true)
+  createdById       String?  @db.Uuid
+  createdAt         DateTime @default(now())
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@index([farmId, date])
+  @@index([farmId, paid])
+}
+
+// ---------- audit ----------
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  farmId    String   @db.Uuid
+  userId    String?  @db.Uuid
+  action    String   // e.g. "milk.create", "expense.create", "group.updateHeadcount"
+  entity    String
+  entityId  String?
+  data      Json?
+  createdAt DateTime @default(now())
+
+  farm Farm  @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([farmId, createdAt])
+}

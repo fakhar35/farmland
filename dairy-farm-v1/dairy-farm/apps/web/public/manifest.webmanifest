@@ -1,0 +1,9 @@
+{
+  "name": "Dairy Farm Manager",
+  "short_name": "DairyFarm",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f5ef",
+  "theme_color": "#1f4a31",
+  "icons": []
+}
